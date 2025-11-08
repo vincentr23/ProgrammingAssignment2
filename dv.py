@@ -4,6 +4,7 @@ import threading
 
 lock = threading.Lock()
 
+# a server class to handle all things server related
 class Server:
     def __init__(self, id, ip = 0, port = 0):
         self.ip = ip
@@ -19,6 +20,7 @@ class Server:
     def __str__(self):
         return f'ID: {self.id} | IP: {self.ip} | Port: {self.port} | Routing Table: {self.rt}'
 
+# global server
 server_info = Server(1)
 
 
@@ -39,7 +41,7 @@ def server(ip, port):
     with lock:
         server_info.up = True
 
-    while(True):
+    while(server_info.up):
         # receive messages
         data, client_address = server_socket.recvfrom(1024)  # buffer size 1024 bytes
         print(f"Received {data.decode()} from {client_address}")
@@ -58,6 +60,8 @@ def handle_file(lines):
     # reads server/neighbor lines
     try:
         with lock:
+            # ingesting txt file
+            # setting default to infinity for all routes except our own
             for i in range(num_servers):
                 if (i+1) != server_info.id:
                     server_info.rt[str(i + 1)] = float('inf')
@@ -66,6 +70,7 @@ def handle_file(lines):
                 if int(next_server[0]) == server_info.id:
                     server_info.ip = next_server[1]
                     server_info.port = int(next_server[2])
+            # setting our edges
             for i in range(num_edges):
                 next_nb = lines[2 + num_servers + i].split()
                 if int(next_nb[0]) == server_info.id:
@@ -74,6 +79,7 @@ def handle_file(lines):
         print(f'Error reading file: {e}')
         return
     with lock:
+        # creating default routing table
         for i in server_info.neighbors:
             server_info.rt[str(i[0])] = i[1]
 
@@ -92,10 +98,12 @@ def handle_command(command):
             with open(command[1], 'r', encoding='utf-8') as file:
                 lines = file.readlines()
                 handle_file(lines)
+
                 # create a thread to handle the server
                 server_info.server_thread = threading.Thread(target=server,
                         args=(server_info.ip, server_info.port), daemon=True)
                 server_info.server_thread.start() # start the thread
+
                 print(server_info)
                 print('Server setup successful!')
         except FileNotFoundError:
