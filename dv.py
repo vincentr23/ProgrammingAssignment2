@@ -50,64 +50,113 @@ def server(ip, port):
 # handles ingesting file
 def handle_file(lines):
     global server_info
-    # reads first two lines
+    
+    #read the network size and our immediate neighbor count
     try:
-        num_servers = int(lines[0])
-        num_edges = int(lines[1])
-    except:
-        print('File is not setup correctly')
+        num_servers = int(lines[0].strip())
+        num_neighbors = int(lines[1].strip()) 
+    except (IndexError, ValueError):
+        print('Error reading file headers (num-servers/num-neighbors). File format might be off.')
         return
-    # reads server/neighbor lines
-    try:
-        with lock:
-            # ingesting txt file
-            # setting default to infinity for all routes except our own
-            for i in range(num_servers):
-                if (i+1) != server_info.id:
-                    server_info.rt[str(i + 1)] = float('inf')
-                next_server = lines[2+i].split()
-                server_info.servers.append((int(next_server[0]), next_server[1], int(next_server[2])))
-                if int(next_server[0]) == server_info.id:
-                    server_info.ip = next_server[1]
-                    server_info.port = int(next_server[2])
-            # setting our edges
-            for i in range(num_edges):
-                next_nb = lines[2 + num_servers + i].split()
-                if int(next_nb[0]) == server_info.id:
-                    server_info.neighbors.append((int(next_nb[1]), int(next_nb[2])))
-    except Exception as e:
-        print(f'Error reading file: {e}')
-        return
+    
+    server_list_end_index = 2 + num_servers
+    
     with lock:
-        # creating default routing table
-        for i in server_info.neighbors:
-            server_info.rt[str(i[0])] = i[1]
+        try:
+            # clear out any old data before loading new topology
+            server_info.servers.clear()
+            server_info.rt.clear()
+            server_info.neighbors.clear()
+            
+            #  read *all* server entries to build the network map and initial routing table
+            for i in range(num_servers):
+                line = lines[2 + i].strip().split()
+                s_id = int(line[0])
+                s_ip = line[1]
+                s_port = int(line[2])
+                
+                # list of servers in network
+                server_info.servers.append((s_id, s_ip, s_port))
+                
+                # initialize the routing table - Bellman-Ford setup
+                if s_id == server_info.id:
+                    # set self IP/ port
+                    server_info.ip = s_ip
+                    server_info.port = s_port
+                    server_info.rt[str(s_id)] = 0
+                else:
+                    server_info.rt[str(s_id)] = float('inf')
+
+            # read NEIGHBOR/EDGE entries to set direct link costs.
+            for i in range(num_neighbors):
+                line = lines[server_list_end_index + i].strip().split()
+                
+                # format is <server-ID1> <server-ID2> <cost>
+                s1_id = int(line[0])
+                s2_id = int(line[1])
+                cost = int(line[2])
+                
+                
+                if s1_id == server_info.id:
+                    neighbor_id = s2_id
+                elif s2_id == server_info.id:
+                    neighbor_id = s1_id
+                else:
+                    # safety check
+                    continue 
+
+                # record the neighbor ID and its initial link cost
+                server_info.neighbors.append((neighbor_id, cost))
+                
+                # update the routing table
+                server_info.rt[str(neighbor_id)] = cost
+
+        except Exception as e:
+            print(f'Major error reading file or parsing entry. Check line formats. Details: {e}')
+            return
+    
+    print(f"Topology successfully loaded for Server ID: {server_info.id}. Initial routing table established.")
 
 
 def handle_command(command):
+    global server_info
+    
+    # check for the correct startup command structure
     if command[0] == 'server':
-        if len(command) != 3:
+        # Expected format: server -t <file> -i <interval>
+        if len(command) != 5 or command[1] != '-t' or command[3] != '-i':
             print('Command should be "server -t <topology-file-name> -i <routing-update-interval>"')
             return
+
+        file_name = command[2]
+        interval_str = command[4]
+        
         try:
-            interval = int(command[2])
+            interval = int(interval_str)
         except ValueError:
             print('Interval (-i) must be a number!')
             return
+        
         try:
-            with open(command[1], 'r', encoding='utf-8') as file:
+            with open(file_name, 'r', encoding='utf-8') as file:
                 lines = file.readlines()
                 handle_file(lines)
 
-                # create a thread to handle the server
-                server_info.server_thread = threading.Thread(target=server,
-                        args=(server_info.ip, server_info.port), daemon=True)
-                server_info.server_thread.start() # start the thread
+                # Only start the server thread if IP/Port were correctly set
+                if server_info.ip != 0 and server_info.port != 0:
+                    # create a thread to handle the server
+                    server_info.server_thread = threading.Thread(target=server,
+                                args=(server_info.ip, server_info.port), daemon=True)
+                    server_info.server_thread.start() 
+                    # start the thread
 
-                print(server_info)
-                print('Server setup successful!')
+                    print(server_info)
+                    print('Server setup successful!')
+                else:
+                    print('Error: Could not find server ID, IP, or Port in the topology file.')
+                    
         except FileNotFoundError:
-            print(f'Error: The file {command[1]} was not found.')
+            print(f'Error: The file {file_name} was not found.')
         except Exception as e:
             print(f"An error occurred: {e}")
 
