@@ -26,6 +26,7 @@ class Server:
         self.server_socket = None
         self.last_heard = {}
         self.watchdog_thread = None
+        self.packets_received_count = 0
 
     def __str__(self):
         return f'id: {self.id} | ip: {self.ip} | port: {self.port} | routing table: {self.rt}'
@@ -66,22 +67,22 @@ class Server:
         updates the direct cost to a neighbor and triggers a route update.
         returns true if an update occurred, false otherwise.
         """
-        # 1. check if the neighbor id is a known neighbor
+        # check if the neighbor id is a known neighbor
         if neighbor_id_str not in self.direct_costs:
             return False # not a neighbor, cannot update
 
-        # 2. check if the cost is actually changing
+        # check if the cost is actually changing
         current_cost = self.direct_costs.get(neighbor_id_str, float('inf'))
         if current_cost == new_cost:
             return False # cost is the same, no update needed
 
-        # 3. apply the new cost
+        # apply the new cost
         self.direct_costs[neighbor_id_str] = new_cost
         
-        # 4. the direct entry in the routing table must also reflect the new cost
+        # the direct entry in the routing table must also reflect the new cost
         self.rt[neighbor_id_str] = new_cost
         
-        # 5. reset the last heard time if the link is now active (cost < INF)
+        # reset the last heard time if the link is now active (cost < INF)
         if new_cost != float('inf'):
             self.last_heard[neighbor_id_str] = time.time()
 
@@ -204,6 +205,7 @@ def server(ip, port):
                 # update last heard *before* table calculation
                 with lock:
                     server_info.last_heard[str(_id)] = time.time()
+                    server_info.packets_received_count += 1
                 
                 get_tables(_id, rt_data)
                 # output required on successful receipt of a route update
@@ -480,6 +482,30 @@ def handle_command(command):
         print('crash success')
         print(f"server {server_info.id} has initiated crash sequence.")
     
+    elif command[0] == 'step':
+        if len(command) != 1:
+            print('step error: usage is just "step"')
+            return
+        
+        if not server_info.up:
+            print('step error: server is not running.')
+            return
+            
+        send_all_rt()
+        print('step success: routing table sent to all neighbors.')
+        
+    
+    elif command[0] == 'packets':
+        if len(command) != 1:
+            print('packets error: usage is just "packets"')
+            return
+            
+        current_count = server_info.packets_received_count
+        print(f"received {current_count} distance vector packets since last display.")
+        
+        # Reset the counter
+        server_info.packets_received_count = 0
+        
     elif command[0] == 'display':
         print(server_info)
     
@@ -496,7 +522,7 @@ def main():
         if command[0] == 'exit':
             
             if server_info.up:
-                # server is running, need to stop the thread
+                # server is running stop the thread
                 with lock:
                     server_info.up = False
                 
