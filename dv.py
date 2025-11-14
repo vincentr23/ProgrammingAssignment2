@@ -98,6 +98,36 @@ def decode_rt(rt_json: str) -> dict:
     data = json.loads(rt_json)
     return {str(k): (float('inf') if int(v) == INF else int(v)) for k, v in data.items()}
     
+# when we receive a shutdown message
+def shutdown(_id):
+    global server_info
+
+    server_info.neighbors.remove(int(_id))
+    server_info.direct_costs[_id] = float('inf')
+    server_info.rt[_id] = float('inf')
+
+def disable(target_id):
+    global server_info, lock
+    try:
+        target_id = int(target_id)
+    except ValueError:
+        print("disable ERROR")
+        return
+
+    with lock:
+        # must be a direct neighbor
+        if target_id not in server_info.neighbors:
+            print("disable ERROR")
+            return
+
+        # set direct link + routing-table row to infinity (keep the row)
+        server_info.direct_costs[str(target_id)] = float('inf')
+        server_info.rt[str(target_id)] = float('inf')
+
+        # mark as unheard so watchdog treats it as down
+        server_info.last_heard[str(target_id)] = 0
+
+    print("disable SUCCESS")
 
 # global server info
 server_info = Server(3)
@@ -505,6 +535,13 @@ def handle_command(command):
         
         # Reset the counter
         server_info.packets_received_count = 0
+        
+    # disable 
+    elif command[0] == 'disable':
+        if len(command) != 2:
+            print('disbale error: usage is "disable <server-ID>"')
+            return
+        disable(command[1])
         
     elif command[0] == 'display':
         print(server_info)
