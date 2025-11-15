@@ -22,6 +22,8 @@ class Server:
         self.rt = {str(id): 0}
         # direct link costs {neighbor_id (str): cost (int/inf)} for fast lookup
         self.direct_costs = {}
+        # Stores the immediate neighbor ID used to reach a destination: {dest_id: next_hop_id}
+        self.next_hop = {str(id): str(id)}
         self.server_thread = None
         self.server_socket = None
         self.last_heard = {}
@@ -169,6 +171,8 @@ def get_tables(_id, table):
 
             if new_cost < current_cost:
                 server_info.rt[dest_id_str] = new_cost
+                # Update the next hop to be the current neighbor (_id)
+                server_info.next_hop[dest_id_str] = str(_id) 
                 print(f"updated route to {dest_id_str} improved via {_id}: {current_cost} → {new_cost}")
             
             
@@ -329,6 +333,7 @@ def handle_file(lines):
             server_info.rt.clear()
             server_info.neighbors.clear()
             server_info.direct_costs.clear()
+            server_info.next_hop.clear() # Clear next_hop tracking
             
             # read *all* server entries to build the network map and initial routing table
             for i in range(num_servers):
@@ -346,6 +351,7 @@ def handle_file(lines):
                     server_info.ip = s_ip
                     server_info.port = s_port
                     server_info.rt[str(s_id)] = 0
+                    server_info.next_hop[str(s_id)] = str(s_id) # Next hop to self is self
                 else:
                     # initial cost to all non-neighbors is infinity
                     server_info.rt[str(s_id)] = float('inf')
@@ -376,6 +382,7 @@ def handle_file(lines):
                 
                 # update the routing table
                 server_info.rt[str(neighbor_id)] = cost
+                server_info.next_hop[str(neighbor_id)] = str(neighbor_id) # Next hop to neighbor is neighbor
 
             # initialize last_heard for all neighbors
             for nid in server_info.neighbors:
@@ -385,6 +392,37 @@ def handle_file(lines):
             return
     
     print(f"topology successfully loaded for server id: {server_info.id}. initial routing table established.")
+
+
+def display_routing_table():
+    """
+    Displays the current routing table, sorted by destination ID,
+    in the required format: <destination-server-ID> <next-hop-server-ID> <cost-of-path>
+    """
+    global server_info
+    
+    output_lines = []
+    
+    # get all destination IDs and sort them
+    dest_ids = [int(d) for d in server_info.rt.keys()]
+    sorted_dest_ids = sorted(dest_ids)
+    
+    #  iterate through sorted IDs and format the output
+    for dest_id in sorted_dest_ids:
+        dest_id_str = str(dest_id)
+        
+        # get the current cost and next hop
+        cost = server_info.rt.get(dest_id_str, float('inf'))
+        next_hop_id = server_info.next_hop.get(dest_id_str, '-') 
+
+        # format the cost: replace float('inf') with "inf"
+        display_cost = "inf" if cost == float('inf') else str(int(cost))
+        
+        # format the required output line
+        line = f"{dest_id_str} {next_hop_id} {display_cost}"
+        output_lines.append(line)
+        
+    print("\n".join(output_lines))
 
 
 def handle_command(command):
@@ -427,7 +465,8 @@ def handle_command(command):
                     interval_thread = threading.Thread(target=interval_check, daemon=True)
                     interval_thread.start()
                     
-                    print(server_info)
+                    # Print full server info on successful setup
+                    print(server_info) 
                     print('server setup successful!')
                 else:
                     print('error: could not find server id, ip, or port in the topology file.')
@@ -544,7 +583,8 @@ def handle_command(command):
         disable(command[1])
         
     elif command[0] == 'display':
-        print(server_info)
+        display_routing_table()
+        print('display SUCCESS')
     
     else:
         print(f'unknown command: {command[0]}')
