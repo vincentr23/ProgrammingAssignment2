@@ -475,7 +475,7 @@ def display_routing_table():
     
     output_lines = []
     
-    # 1. Get all destination IDs and sort them
+    
     dest_ids = []
     for d in server_info.rt.keys():
         try:
@@ -486,11 +486,11 @@ def display_routing_table():
             
     sorted_dest_ids = sorted(dest_ids)
 
-    # --- Start of New Formatting ---
+    
     print("---------ROUTING TABLE-----------") 
     print("destServerID- nextHopServerID- Cost")
     
-    # 2. Iterate through sorted IDs and format the output
+    
     for dest_id in sorted_dest_ids:
         dest_id_str = str(dest_id)
         
@@ -502,19 +502,16 @@ def display_routing_table():
         # Format the cost: replace float('inf') with "inf"
         display_cost = "inf" if cost == float('inf') else str(int(cost))
         
-        # Format the required output line
-        # NOTE: Using a single space separator here to keep the data clean, 
-        # as the header uses dashes.
+      
         line = f"{dest_id_str} {next_hop_id} {display_cost}" 
         output_lines.append(line)
         
     print("\n".join(output_lines))
     print("----------END ROUTING TABLE------")
-    # --- End of New Formatting ---
+ 
 
 
-# NOTE: The "display SUCCESS" is printed by the handle_command function 
-# immediately after this function returns.
+
 
 
 def handle_command(command):
