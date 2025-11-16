@@ -4,7 +4,7 @@ import threading
 from threading import Timer
 import json
 import time
-
+import traceback
 lock = threading.Lock()
 INF = 65535 # integer representation of infinity for json serialization
 
@@ -41,7 +41,7 @@ class Server:
         self.packets_received_count = 0
 
     def __str__(self):
-        return f'id: {self.id} | ip: {self.ip} | port: {self.port} | routing table: {self.rt}'
+        return f'id: {self.id} | ip: {self.ip} | port: {self.port} | routing table: {self.rt}\n neighbors: {self.neighbors}'
 
     def get_direct_link_cost(self, neighbor_id):
         """
@@ -72,7 +72,7 @@ class Server:
     
     def server_by_id(self, _id):
         for sid, ip, port in self.servers:
-            if sid == _id:
+            if str(sid) == _id:
                 return ip, port
         
         return None, None
@@ -129,23 +129,22 @@ def disable(target_id):
         print("disable ERROR")
         return
 
-    with lock:
-        try:
-            # must be a direct neighbor
-            target = server_info.neighbors[str(target_id)]
-        except:
-            print('Must be a neighbor in order to disable.')
-            return
+    # must be a direct neighbor
+    target = server_info.neighbors.get(str(target_id), -1)
+    if target < 0:
+        print('Must be a neighbor in order to disable.')
+        return
 
+    with lock:
         # set direct link + routing-table row to infinity (keep the row)
         server_info.neighbors.pop(str(target_id))
         server_info.rt[str(target_id)] = float('inf')
 
         # mark as unheard so watchdog treats it as down
         server_info.last_heard[str(target_id)] = 0
-        signal_neighbor_change(str(target_id), -1)
 
-    print("disable SUCCESS")
+    signal_neighbor_change(str(target_id), -1)
+
 
 # when we make a change to a neighbor, we want to let everyone else know
 # so they can update their routing table
@@ -154,6 +153,7 @@ def signal_neighbors_change():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     message = 'refactor'
     for nid in server_info.neighbors.keys():
+        print(nid)
         ip,port = server_info.server_by_id(nid)
         sock.sendto(message.encode('utf-8'), (ip, port))
     time.sleep(1)
@@ -162,7 +162,7 @@ def signal_neighbors_change():
 def signal_neighbor_change(_id, cost):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     message = f'refactor|{_id}|{cost}'
-    ip,port = server_info.server_by_id(_id)
+    ip,port = server_info.server_by_id(str(_id))
     sock.sendto(message.encode('utf-8'), (ip, port))
     time.sleep(1)
     refactor()
@@ -171,14 +171,16 @@ def signal_neighbor_change(_id, cost):
 def refactor():
     global server_info,lock
 
-    server_info.rt.clear()
-    server_info.route_to.clear()
+    with lock:
+        server_info.rt.clear()
+        server_info.route_to.clear()
 
 
-    # for each of our neighbors, we will set that as default
-    for s in server_info.servers:
-        server_info.rt[str(s[0])] = server_info.neighbors.get(str(s[0]), float('inf'))
-        server_info.rt[str(server_info.id)] = 0
+        # for each of our neighbors, we will set that as default
+        for s in server_info.servers:
+            server_info.rt[str(s[0])] = server_info.neighbors.get(str(s[0]), float('inf'))
+            server_info.rt[str(server_info.id)] = 0
+            print(server_info)
                 
     time.sleep(1)
     send_all_rt()
@@ -200,7 +202,7 @@ def get_tables(_id, table):
     nid = str(_id)
     
     with lock:
-        cost_to_neighbor = server_info.neighbors[nid]
+        cost_to_neighbor = server_info.neighbors.get(nid, float('inf'))
 
         # iterate through all destinations in the neighbor's table
         for dest_id_str, neighbor_cost_to_dest in table.items():
@@ -247,8 +249,9 @@ def send_all_rt():
     global server_info
     
     # send to neighbors only
-    for nb in server_info.neighbors.keys():
-        send_rt(nb)
+    with lock:
+        for nb in server_info.neighbors.keys():
+            send_rt(nb)
 
 # listens for incoming messages
 def server(ip, port):
@@ -293,7 +296,7 @@ def server(ip, port):
                 print(f"received a message from server {_id}") 
             
             elif message[0] == 'refactor':
-                if message[1] and message[2]:
+                if len(message) == 3 and message[1] and message[2]:
                     try:
                         cost = int(message[2])
                         if cost < 0:
@@ -325,6 +328,8 @@ def server(ip, port):
             # handle other exceptions during run
             if server_info.up:
                 print(f"server running general error: {e}")
+                print(f"server running error type: {type(e).__name__}, repr: {repr(e)}")
+                traceback.print_exc()
             break
             
     # cleanup:
@@ -356,16 +361,17 @@ def watchdog_loop():
                         trip_neighbors.append(nid)
 
             # here we will actually poison the route
-            for nid in trip_neighbors:
-                print(f'we have not heard from {nid} in 3 intervals. link cost set to infinity.')
-                
-                # poison the route to this neighbor
-                # server_info.direct_costs[nid] = float('inf')
+        for nid in trip_neighbors:
+            print(f'we have not heard from {nid} in 3 intervals. link cost set to infinity.')
+            
+            # poison the route to this neighbor
+            # server_info.direct_costs[nid] = float('inf')
+            with lock:
                 server_info.rt[nid] = float('inf')
                 server_info.neighbors.pop(nid, None)
-                
-                # initiate an update broadcast since the table has changed
-                signal_neighbors_change()
+            
+            # initiate an update broadcast since the table has changed
+            signal_neighbors_change()
 
         time.sleep(server_info.interval)
 
@@ -430,7 +436,7 @@ def handle_file(lines):
                     continue 
 
                 # record the neighbor id
-                server_info.neighbors[neighbor_id] = cost
+                server_info.neighbors[str(neighbor_id)] = cost
                 
                 # update the direct_costs dictionary
                 # server_info.direct_costs[str(neighbor_id)] = cost
@@ -542,7 +548,7 @@ def handle_command(command):
 
             # update neighbor or add to neighbor
             server_info.neighbors[neighbor_id_str] = new_cost
-            signal_neighbor_change(neighbor_id, new_cost)
+            signal_neighbor_change(neighbor_id_str, new_cost)
 
         # crashes server        
         elif command[0] == 'crash':
@@ -592,7 +598,7 @@ def handle_command(command):
             
         elif command[0] == 'display':
             routes = server_info.rt
-            print(server_info.rt)
+            print(server_info)
             print('--------Routing Table--------')
             for i in range(len(routes)):
                 r, sr = i + 1, str(i+1)
@@ -606,6 +612,8 @@ def handle_command(command):
         print(f'{" ".join(command)} SUCCESS')
     except Exception as e:
         print(f'{" ".join(command)} ERROR: {e}')
+        print(f"error type: {type(e).__name__}, repr: {repr(e)}")
+        traceback.print_exc()
 
 def main():
     global server_info,lock
