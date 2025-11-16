@@ -5,7 +5,7 @@ from threading import Timer
 import json
 import time
 
-# --- INITIALIZATION ---
+# initialization
 # Check for command line argument for server ID
 if len(sys.argv) < 2:
     print("Usage: python dv.py <server-id>")
@@ -16,7 +16,7 @@ try:
 except ValueError:
     print("Error: Server ID must be an integer.")
     sys.exit(1)
-# ----------------------
+
 
 
 lock = threading.Lock()
@@ -144,15 +144,15 @@ def disable(target_id):
         # mark as unheard so watchdog treats it as down
         server_info.last_heard[target_id_str] = 0
     
-    # 1. Send out an immediate update (our routing table has changed)
+   
     send_all_rt()
 
-    # 2. FIX: Send a symmetric link update to the neighbor to enforce the link cost change on their side instantly.
+    
     send_link_update(target_id_int, 'inf')
 
     print("disable SUCCESS")
 
-# global server info (initialized using the command-line argument)
+# global server info 
 server_info = Server(INITIAL_SERVER_ID)
 
 # at each interval, it will ask all neighbors for their routing table
