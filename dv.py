@@ -19,6 +19,17 @@ class UnknownCommand(Exception):
         super().__init__(self.message)
     def __str__(self):
         return self.message
+class BadDisable(Exception):
+    '''
+    User entered a bad command
+    Attributes:
+        message -- explanation of error
+    '''
+    def __init__(self, message="Can only disable neighbor"):
+        self.message = message
+        super().__init__(self.message)
+    def __str__(self):
+        return self.message
 # a server class to handle all things server related
 class Server:
     def __init__(self, id, ip = 0, port = 0):
@@ -132,7 +143,7 @@ def disable(target_id):
     # must be a direct neighbor
     target = server_info.neighbors.get(str(target_id), -1)
     if target < 0:
-        print('Must be a neighbor in order to disable.')
+        raise BadDisable('Can only disable a neighbor')
         return
 
     with lock:
@@ -161,7 +172,7 @@ def signal_neighbors_change():
 
 def signal_neighbor_change(_id, cost):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    message = f'refactor|{_id}|{cost}'
+    message = f'refactor|{server_info.id}|{cost}'
     ip,port = server_info.server_by_id(str(_id))
     sock.sendto(message.encode('utf-8'), (ip, port))
     time.sleep(1)
@@ -180,7 +191,6 @@ def refactor():
         for s in server_info.servers:
             server_info.rt[str(s[0])] = server_info.neighbors.get(str(s[0]), float('inf'))
             server_info.rt[str(server_info.id)] = 0
-            print(server_info)
                 
     time.sleep(1)
     send_all_rt()
@@ -495,7 +505,6 @@ def handle_command(command):
                         interval_thread = threading.Thread(target=interval_check, daemon=True)
                         interval_thread.start()
                         
-                        print(server_info)
                     else:
                         print('error: could not find server id, ip, or port in the topology file.')
                         
@@ -598,7 +607,6 @@ def handle_command(command):
             
         elif command[0] == 'display':
             routes = server_info.rt
-            print(server_info)
             print('--------Routing Table--------')
             for i in range(len(routes)):
                 r, sr = i + 1, str(i+1)
