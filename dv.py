@@ -5,6 +5,20 @@ from threading import Timer
 import json
 import time
 
+# --- INITIALIZATION ---
+# Check for command line argument for server ID
+if len(sys.argv) < 2:
+    print("Usage: python dv.py <server-id>")
+    sys.exit(1)
+
+try:
+    INITIAL_SERVER_ID = int(sys.argv[1])
+except ValueError:
+    print("Error: Server ID must be an integer.")
+    sys.exit(1)
+# ----------------------
+
+
 lock = threading.Lock()
 INF = 65535 # integer representation of infinity for json serialization
 
@@ -111,28 +125,35 @@ def shutdown(_id):
 def disable(target_id):
     global server_info, lock
     try:
-        target_id = int(target_id)
+        target_id_int = int(target_id)
+        target_id_str = str(target_id)
     except ValueError:
-        print("disable ERROR")
+        print("disable ERROR: Server ID must be an integer.")
         return
 
     with lock:
         # must be a direct neighbor
-        if target_id not in server_info.neighbors:
-            print("disable ERROR")
+        if target_id_int not in server_info.neighbors:
+            print("disable ERROR: Server is not a direct neighbor.")
             return
 
         # set direct link + routing-table row to infinity (keep the row)
-        server_info.direct_costs[str(target_id)] = float('inf')
-        server_info.rt[str(target_id)] = float('inf')
+        server_info.direct_costs[target_id_str] = float('inf')
+        server_info.rt[target_id_str] = float('inf')
 
         # mark as unheard so watchdog treats it as down
-        server_info.last_heard[str(target_id)] = 0
+        server_info.last_heard[target_id_str] = 0
+    
+    # 1. Send out an immediate update (our routing table has changed)
+    send_all_rt()
+
+    # 2. FIX: Send a symmetric link update to the neighbor to enforce the link cost change on their side instantly.
+    send_link_update(target_id_int, 'inf')
 
     print("disable SUCCESS")
 
-# global server info
-server_info = Server(3)
+# global server info (initialized using the command-line argument)
+server_info = Server(INITIAL_SERVER_ID)
 
 # at each interval, it will ask all neighbors for their routing table
 def interval_check():
@@ -168,15 +189,23 @@ def get_tables(_id, table):
 
             # current cost in our table
             current_cost = server_info.rt.get(dest_id_str, float('inf'))
+            current_next_hop = server_info.next_hop.get(dest_id_str, None)
 
+            # Bellman-Ford logic
+            # Case 1: New path is cheaper
             if new_cost < current_cost:
                 server_info.rt[dest_id_str] = new_cost
                 # Update the next hop to be the current neighbor (_id)
                 server_info.next_hop[dest_id_str] = str(_id) 
-                print(f"updated route to {dest_id_str} improved via {_id}: {current_cost} → {new_cost}")
+                # print(f"updated route to {dest_id_str} improved via {_id}: {current_cost} → {new_cost}")
             
+            # Case 2: The current next hop is via this neighbor, but their cost to dest changed.
+            elif current_next_hop == neighbor_id_str:
+                if new_cost != current_cost:
+                    # The cost via our current next hop changed. We must adopt the new cost.
+                    server_info.rt[dest_id_str] = new_cost
+                    # print(f"updated route to {dest_id_str} cost changed via {_id}: {current_cost} → {new_cost}")
             
-
 # send our routing table to specified id
 # sends as json
 def send_rt(_id):
@@ -190,11 +219,13 @@ def send_rt(_id):
         # use a new socket for sending to avoid interrupting the main server_socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rt_json = encode_rt(server_info.rt)
+        # Message format: recvrt|my_id|rt_json
         message = f'recvrt|{server_info.id}|{rt_json}'
         sock.sendto(message.encode('utf-8'), (ip, port))
     
     except Exception as e:
-        print(f'error occured while sending to {_id}: {e}')
+        # print(f'error occured while sending to {_id}: {e}')
+        pass # suppress error if neighbor is down
 
 # broadcasts routing table
 def send_all_rt():
@@ -203,6 +234,25 @@ def send_all_rt():
     # send to neighbors only
     for nb in server_info.neighbors:
         send_rt(nb)
+
+# Sends a command to a neighbor to symmetrically update its local link cost.
+def send_link_update(_id, new_cost_str):
+    global server_info
+
+    ip, port = server_info.server_by_id(_id)
+    if not ip:
+        return
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Message format: update_link|my_id|new_cost_to_me
+        message = f'update_link|{server_info.id}|{new_cost_str}'
+        sock.sendto(message.encode('utf-8'), (ip, port))
+    
+    except Exception as e:
+        # print(f'error occured while sending link update to {_id}: {e}')
+        pass # suppress error if neighbor is down
+
 
 def server(ip, port):
     global server_info, lock
@@ -244,6 +294,28 @@ def server(ip, port):
                 get_tables(_id, rt_data)
                 # output required on successful receipt of a route update
                 print(f"received a message from server {_id}") 
+
+            # means we received a link cost update command from a neighbor
+            elif message[0] == 'update_link':
+                neighbor_id = int(message[1])
+                new_cost_str = message[2].lower()
+
+                # Convert cost string back to float('inf') or int
+                if new_cost_str == 'inf':
+                    new_cost = float('inf')
+                else:
+                    new_cost = int(new_cost_str)
+
+                neighbor_id_str = str(neighbor_id)
+                
+                with lock:
+                    # Update our local link cost TO the neighbor that sent the instruction (bidirectional change)
+                    updated_locally = server_info.update_link_cost(neighbor_id_str, new_cost)
+                
+                if updated_locally:
+                    # If our cost changed, we need to broadcast our new table
+                    send_all_rt()
+                    print(f"received link update from {neighbor_id}. Link cost to {neighbor_id} is now {new_cost_str}.")
             
             else:
                 # for simple message receipt confirmation
@@ -294,13 +366,13 @@ def watchdog_loop():
                 # if we hit threshold
                 if now - last > threshold:
                     # check if the link is not already marked as inf
-                    if server_info.rt[nid_str] != float('inf'):
+                    if server_info.rt.get(nid_str) != float('inf'): # Use .get for safety
                         trip_neighbors.append(nid)
 
             # here we will actually poison the route
             for nid in trip_neighbors:
                 nid_str = str(nid)
-                print(f'we have not heard from {nid_str} in 3 intervals. link cost set to infinity.')
+                print(f'we have not heard from {nid_str} in {threshold} seconds. Link cost set to infinity.')
                 
                 # poison the route to this neighbor
                 server_info.direct_costs[nid_str] = float('inf')
@@ -397,32 +469,52 @@ def handle_file(lines):
 def display_routing_table():
     """
     Displays the current routing table, sorted by destination ID,
-    in the required format: <destination-server-ID> <next-hop-server-ID> <cost-of-path>
+    in the requested format: destServerID- nextHopServerID- Cost
     """
     global server_info
     
     output_lines = []
     
-    # get all destination IDs and sort them
-    dest_ids = [int(d) for d in server_info.rt.keys()]
+    # 1. Get all destination IDs and sort them
+    dest_ids = []
+    for d in server_info.rt.keys():
+        try:
+            dest_ids.append(int(d))
+        except ValueError:
+            # Skip any non-integer keys
+            continue
+            
     sorted_dest_ids = sorted(dest_ids)
+
+    # --- Start of New Formatting ---
+    print("---------ROUTING TABLE-----------") 
+    print("destServerID- nextHopServerID- Cost")
     
-    #  iterate through sorted IDs and format the output
+    # 2. Iterate through sorted IDs and format the output
     for dest_id in sorted_dest_ids:
         dest_id_str = str(dest_id)
         
-        # get the current cost and next hop
+        # Get the current cost and next hop
         cost = server_info.rt.get(dest_id_str, float('inf'))
+        # If the next hop is not set, default to '-'
         next_hop_id = server_info.next_hop.get(dest_id_str, '-') 
 
-        # format the cost: replace float('inf') with "inf"
+        # Format the cost: replace float('inf') with "inf"
         display_cost = "inf" if cost == float('inf') else str(int(cost))
         
-        # format the required output line
-        line = f"{dest_id_str} {next_hop_id} {display_cost}"
+        # Format the required output line
+        # NOTE: Using a single space separator here to keep the data clean, 
+        # as the header uses dashes.
+        line = f"{dest_id_str} {next_hop_id} {display_cost}" 
         output_lines.append(line)
         
     print("\n".join(output_lines))
+    print("----------END ROUTING TABLE------")
+    # --- End of New Formatting ---
+
+
+# NOTE: The "display SUCCESS" is printed by the handle_command function 
+# immediately after this function returns.
 
 
 def handle_command(command):
@@ -438,6 +530,11 @@ def handle_command(command):
         file_name = command[2]
         interval_str = command[4]
         
+        # Prevent starting the server if it's already running
+        if server_info.up:
+            print("Server is already running. Please crash or exit before starting a new one.")
+            return
+
         try:
             with lock:
                 server_info.interval = int(interval_str) # storing this for future use
@@ -528,13 +625,16 @@ def handle_command(command):
             updated = server_info.update_link_cost(neighbor_id_str, new_cost)
 
         if updated:
+            # Propagate the update to the neighbor so they update their cost symmetrically
+            send_link_update(neighbor_id, cost_str)
+            
             # immediately send updates to neighbors
             send_all_rt()
             # print success message
-            print('update success')
+            print('update SUCCESS')
         else:
             # this happens if cost didn't change, or neighbor was not found 
-            print('update success (no change applied).')
+            print('update SUCCESS (no change applied).')
 
     # crashes server        
     elif command[0] == 'crash':
@@ -548,7 +648,9 @@ def handle_command(command):
             
         server_info.crash()
         
-        print('crash success')
+        # Neighbor must handle this close correctly and set link cost to infinity
+        
+        print('crash SUCCESS') 
         print(f"server {server_info.id} has initiated crash sequence.")
     
     elif command[0] == 'step':
@@ -561,7 +663,8 @@ def handle_command(command):
             return
             
         send_all_rt()
-        print('step success: routing table sent to all neighbors.')
+        print('step SUCCESS') 
+        print('routing table sent to all neighbors.')
         
     
     elif command[0] == 'packets':
@@ -570,21 +673,24 @@ def handle_command(command):
             return
             
         current_count = server_info.packets_received_count
-        print(f"received {current_count} distance vector packets since last display.")
+        print(f"received {current_count} distance vector packets since last invocation of this information.")
         
         # Reset the counter
         server_info.packets_received_count = 0
         
+        print('packets SUCCESS') 
+        
     # disable 
     elif command[0] == 'disable':
         if len(command) != 2:
-            print('disbale error: usage is "disable <server-ID>"')
+            print('disable ERROR: usage is "disable <server-ID>"')
             return
-        disable(command[1])
+        # The disable function now includes a symmetric link update
+        disable(command[1]) # disable function prints "disable SUCCESS"
         
     elif command[0] == 'display':
-        display_routing_table()
-        print('display SUCCESS')
+        display_routing_table() # Display the current routing table
+        print('display SUCCESS') 
     
     else:
         print(f'unknown command: {command[0]}')
@@ -592,7 +698,12 @@ def handle_command(command):
 def main():
     global server_info,lock
     while True:
-        message = input('>')
+        try:
+            message = input('>')
+        except EOFError:
+            # Handle Ctrl+D or end of pipe
+            break
+
         if len(message) == 0:
             continue
         command = message.split()
